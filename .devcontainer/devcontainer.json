@@ -1,6 +1,6 @@
 {
   "name": "Podman Quadlet Testing",
-  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.10",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu-24.04",
   "features": {
     "ghcr.io/devcontainers/features/docker-in-docker:2": {
       "version": "latest",
