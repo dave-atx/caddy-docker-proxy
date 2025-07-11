@@ -6,16 +6,10 @@ RUN xcaddy build \
     --with github.com/caddy-dns/cloudflare
 
 # Final stage - use distroless
-FROM gcr.io/distroless/static-debian12:nonroot
+FROM gcr.io/distroless/static-debian12:latest
 
 # Copy Caddy binary from builder
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
-
-# Copy CA certificates
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
-
-# Use nonroot user
-USER nonroot:nonroot
 
 # Expose ports
 EXPOSE 80 443 2019
