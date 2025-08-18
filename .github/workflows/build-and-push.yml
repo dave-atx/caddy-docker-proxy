@@ -23,7 +23,7 @@ jobs:
       cloudflare-version: ${{ steps.versions.outputs.cloudflare-version }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Get latest versions
         id: versions
@@ -64,7 +64,7 @@ jobs:
       packages: write
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
