@@ -32,6 +32,12 @@ jobs:
           PROXY_VERSION=$(curl -s https://api.github.com/repos/lucaslorentz/caddy-docker-proxy/releases/latest | jq -r .tag_name)
           CLOUDFLARE_VERSION=$(curl -s https://api.github.com/repos/caddy-dns/cloudflare/tags | jq -r '.[0].name')
 
+          if [ "$CADDY_VERSION" = "null" ] || [ "$PROXY_VERSION" = "null" ] || [ "$CLOUDFLARE_VERSION" = "null" ]; then
+            echo "Error: One or more versions are null. Likely a GitHub API error."
+            echo "caddy=$CADDY_VERSION, proxy=$PROXY_VERSION, cloudflare=$CLOUDFLARE_VERSION"
+            exit 1
+          fi
+
           echo "caddy-version=$CADDY_VERSION" >> $GITHUB_OUTPUT
           echo "proxy-version=$PROXY_VERSION" >> $GITHUB_OUTPUT
           echo "cloudflare-version=$CLOUDFLARE_VERSION" >> $GITHUB_OUTPUT
