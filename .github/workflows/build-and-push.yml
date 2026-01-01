@@ -94,13 +94,15 @@ jobs:
             type=raw,value=latest,enable={{is_default_branch}}
           labels: |
             org.opencontainers.image.title="Caddy with Docker Proxy and Cloudflare DNS"
-            org.opencontainers.image.description="Custom Caddy build with caddy-docker-proxy and cloudflare-dns plugins"
+            org.opencontainers.image.source="https://github.com/dave-atx/caddy-docker-proxy"
             org.opencontainers.image.vendor="marquard.org"
             org.opencontainers.image.licenses="Apache-2.0"
             org.opencontainers.image.version={{date 'YYYYMMDD'}}
             org.marquard.caddy.version=${{ needs.check-updates.outputs.caddy-version }}
             org.marquard.caddy-docker-proxy.version=${{ needs.check-updates.outputs.proxy-version }}
             org.marquard.caddy-dns-cloudflare.version=${{ needs.check-updates.outputs.cloudflare-version }}
+          annotations: |
+            org.opencontainers.image.description="Custom Caddy build with caddy-docker-proxy and cloudflare-dns plugins"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -110,6 +112,7 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          annotations: ${{ steps.meta.outputs.annotations }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
