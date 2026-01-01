@@ -30,7 +30,7 @@ jobs:
         run: |
           CADDY_VERSION=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -r .tag_name)
           PROXY_VERSION=$(curl -s https://api.github.com/repos/lucaslorentz/caddy-docker-proxy/releases/latest | jq -r .tag_name)
-          CLOUDFLARE_VERSION=$(curl -s https://api.github.com/repos/caddy-dns/cloudflare/releases/latest | jq -r .tag_name)
+          CLOUDFLARE_VERSION=$(curl -s https://api.github.com/repos/caddy-dns/cloudflare/tags | jq -r '.[0].name')
 
           echo "caddy-version=$CADDY_VERSION" >> $GITHUB_OUTPUT
           echo "proxy-version=$PROXY_VERSION" >> $GITHUB_OUTPUT
