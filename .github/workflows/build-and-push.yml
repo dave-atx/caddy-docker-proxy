@@ -9,68 +9,225 @@ on:
     branches: [ main ]
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Only auto-cancel superseded PR runs; let main/schedule publishes finish.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/caddy-proxy
 
 jobs:
   check-updates:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-slim
+    permissions:
+      packages: read
     outputs:
       should-build: ${{ steps.check.outputs.should-build }}
-      caddy-version: ${{ steps.versions.outputs.caddy-version }}
-      proxy-version: ${{ steps.versions.outputs.proxy-version }}
-      cloudflare-version: ${{ steps.versions.outputs.cloudflare-version }}
+      caddy-version: ${{ steps.latest.outputs.caddy }}
+      proxy-version: ${{ steps.latest.outputs.proxy }}
+      cloudflare-version: ${{ steps.latest.outputs.cloudflare }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Get latest versions
-        id: versions
+      - name: Get latest upstream versions
+        id: latest
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          CADDY_VERSION=$(curl -s https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -r .tag_name)
-          PROXY_VERSION=$(curl -s https://api.github.com/repos/lucaslorentz/caddy-docker-proxy/releases/latest | jq -r .tag_name)
-          CLOUDFLARE_VERSION=$(curl -s https://api.github.com/repos/caddy-dns/cloudflare/tags | jq -r '.[0].name')
+          set -euo pipefail
+          gh_api() {
+            curl -fsSL -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" "$1"
+          }
+          CADDY=$(gh_api https://api.github.com/repos/caddyserver/caddy/releases/latest | jq -r .tag_name)
+          PROXY=$(gh_api https://api.github.com/repos/lucaslorentz/caddy-docker-proxy/releases/latest | jq -r .tag_name)
+          # This repo publishes tags (no GitHub releases) and the /tags order is not
+          # guaranteed, so take the highest stable semver rather than the newest tag.
+          CLOUDFLARE=$(gh_api "https://api.github.com/repos/caddy-dns/cloudflare/tags?per_page=100" \
+            | jq -r '[.[].name | select(test("^v?[0-9]+\\.[0-9]+\\.[0-9]+$"))] | sort_by(sub("^v";"") | split(".") | map(tonumber)) | last')
 
-          if [ "$CADDY_VERSION" = "null" ] || [ "$PROXY_VERSION" = "null" ] || [ "$CLOUDFLARE_VERSION" = "null" ]; then
-            echo "Error: One or more versions are null. Likely a GitHub API error."
-            echo "caddy=$CADDY_VERSION, proxy=$PROXY_VERSION, cloudflare=$CLOUDFLARE_VERSION"
-            exit 1
-          fi
+          for v in "$CADDY" "$PROXY" "$CLOUDFLARE"; do
+            if [ -z "$v" ] || [ "$v" = "null" ]; then
+              echo "Error: got an empty/null version (caddy=$CADDY proxy=$PROXY cloudflare=$CLOUDFLARE)"
+              exit 1
+            fi
+          done
 
-          echo "caddy-version=$CADDY_VERSION" >> $GITHUB_OUTPUT
-          echo "proxy-version=$PROXY_VERSION" >> $GITHUB_OUTPUT
-          echo "cloudflare-version=$CLOUDFLARE_VERSION" >> $GITHUB_OUTPUT
+          {
+            echo "caddy=$CADDY"
+            echo "proxy=$PROXY"
+            echo "cloudflare=$CLOUDFLARE"
+          } >> "$GITHUB_OUTPUT"
 
-      - name: Check if rebuild needed
-        id: check
+      - name: Read versions from the :latest image labels
+        id: current
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
         run: |
-          # Check if versions file exists
-          if [ ! -f versions.txt ]; then
-            echo "should-build=true" >> $GITHUB_OUTPUT
+          set -euo pipefail
+          IMAGE=$(echo "${IMAGE_NAME}" | tr '[:upper:]' '[:lower:]')
+
+          # A pull token scoped to this repository's package (works for public and
+          # private packages; returns a token even if the package doesn't exist yet).
+          TOKEN=$(curl -fsSL -u "${ACTOR}:${GH_TOKEN}" \
+            "https://${REGISTRY}/token?service=${REGISTRY}&scope=repository:${IMAGE}:pull" \
+            | jq -r '.token // .access_token')
+
+          api() {
+            curl -fsSL -H "Authorization: Bearer ${TOKEN}" \
+              -H "Accept: application/vnd.oci.image.index.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.v2+json" \
+              "https://${REGISTRY}/v2/${IMAGE}/$1"
+          }
+
+          # No :latest yet (first build) -> force a build with empty "current" versions.
+          if ! TOP=$(api "manifests/latest"); then
+            echo "No :latest image found; forcing a build."
+            { echo "caddy="; echo "proxy="; echo "cloudflare="; } >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
-          # Compare versions
-          CURRENT_VERSIONS="${{ steps.versions.outputs.caddy-version }},${{ steps.versions.outputs.proxy-version }},${{ steps.versions.outputs.cloudflare-version }}"
-          STORED_VERSIONS=$(cat versions.txt)
-
-          if [ "$CURRENT_VERSIONS" != "$STORED_VERSIONS" ]; then
-            echo "should-build=true" >> $GITHUB_OUTPUT
+          # Multi-arch index -> resolve the linux/amd64 image manifest; skip
+          # attestation manifests. Single-arch -> the config is already here.
+          ARCH_DIGEST=$(echo "$TOP" | jq -r '
+            .manifests // [] | map(select(.platform.os=="linux" and .platform.architecture=="amd64"))[0].digest // empty')
+          if [ -n "$ARCH_DIGEST" ]; then
+            MANIFEST=$(api "manifests/${ARCH_DIGEST}")
           else
-            echo "should-build=false" >> $GITHUB_OUTPUT
+            MANIFEST=$TOP
           fi
 
-  build-and-push:
+          CONFIG_DIGEST=$(echo "$MANIFEST" | jq -r '.config.digest')
+          CONFIG=$(api "blobs/${CONFIG_DIGEST}")
+
+          label() { echo "$CONFIG" | jq -r --arg k "$1" '.config.Labels[$k] // empty'; }
+          {
+            echo "caddy=$(label org.marquard.caddy.version)"
+            echo "proxy=$(label org.marquard.caddy-docker-proxy.version)"
+            echo "cloudflare=$(label org.marquard.caddy-dns-cloudflare.version)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Decide whether to build
+        id: check
+        env:
+          LATEST: ${{ steps.latest.outputs.caddy }},${{ steps.latest.outputs.proxy }},${{ steps.latest.outputs.cloudflare }}
+          CURRENT: ${{ steps.current.outputs.caddy }},${{ steps.current.outputs.proxy }},${{ steps.current.outputs.cloudflare }}
+        run: |
+          set -euo pipefail
+          echo "latest:  $LATEST"
+          echo "current: $CURRENT"
+          if [ "$LATEST" != "$CURRENT" ]; then
+            echo "should-build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should-build=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build:
     needs: check-updates
     if: needs.check-updates.outputs.should-build == 'true' || github.event_name != 'schedule'
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.runner }}
     permissions:
-      contents: write
+      contents: read
       packages: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/amd64
+            runner: ubuntu-26.04
+          - platform: linux/arm64
+            runner: ubuntu-26.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v7
+
+      - name: Prepare
+        id: prep
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: |
+          set -euo pipefail
+          echo "pair=${PLATFORM//\//-}" >> "$GITHUB_OUTPUT"
+          echo "image=${IMAGE,,}" >> "$GITHUB_OUTPUT"
+
+      - name: Extract metadata (labels)
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          labels: |
+            org.opencontainers.image.title=Caddy with Docker Proxy and Cloudflare DNS
+            org.opencontainers.image.description=Custom Caddy build with caddy-docker-proxy and cloudflare-dns plugins
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.vendor=marquard.org
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version={{date 'YYYYMMDD'}}
+            org.marquard.caddy.version=${{ needs.check-updates.outputs.caddy-version }}
+            org.marquard.caddy-docker-proxy.version=${{ needs.check-updates.outputs.proxy-version }}
+            org.marquard.caddy-dns-cloudflare.version=${{ needs.check-updates.outputs.cloudflare-version }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to Container Registry
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # PRs: build both arches to validate (cache only, no push).
+      # main/schedule/dispatch: push each arch by digest for the merge job.
+      - name: Build
+        id: build
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          labels: ${{ steps.meta.outputs.labels }}
+          provenance: false
+          cache-from: type=gha,scope=${{ steps.prep.outputs.pair }}
+          cache-to: type=gha,mode=max,scope=${{ steps.prep.outputs.pair }}
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', steps.prep.outputs.image) }}
+
+      - name: Export digest
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          mkdir -p "${{ runner.temp }}/digests"
+          digest="${{ steps.build.outputs.digest }}"
+          touch "${{ runner.temp }}/digests/${digest#sha256:}"
+
+      - name: Upload digest
+        if: github.event_name != 'pull_request'
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-${{ steps.prep.outputs.pair }}
+          path: ${{ runner.temp }}/digests/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: [ check-updates, build ]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-26.04
+    permissions:
+      packages: write
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/digests
+          pattern: digests-*
+          merge-multiple: true
+
+      - name: Lowercase image name
+        id: img
+        env:
+          IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+        run: echo "name=${IMAGE,,}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -82,46 +239,42 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
+      - name: Extract metadata (tags + index annotations)
         id: meta
         uses: docker/metadata-action@v6
+        env:
+          # ghcr.io reads the package description from the *index*-level annotation
+          # for multi-arch images, so emit annotations at that level.
+          DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
             type=schedule,pattern={{date 'YYYYMMDD'}}
+            type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
-          labels: |
-            org.opencontainers.image.title="Caddy with Docker Proxy and Cloudflare DNS"
-            org.opencontainers.image.source="https://github.com/dave-atx/caddy-docker-proxy"
-            org.opencontainers.image.vendor="marquard.org"
-            org.opencontainers.image.licenses="Apache-2.0"
-            org.opencontainers.image.version={{date 'YYYYMMDD'}}
-            org.marquard.caddy.version=${{ needs.check-updates.outputs.caddy-version }}
-            org.marquard.caddy-docker-proxy.version=${{ needs.check-updates.outputs.proxy-version }}
-            org.marquard.caddy-dns-cloudflare.version=${{ needs.check-updates.outputs.cloudflare-version }}
           annotations: |
-            org.opencontainers.image.description="Custom Caddy build with caddy-docker-proxy and cloudflare-dns plugins"
+            org.opencontainers.image.title=Caddy with Docker Proxy and Cloudflare DNS
+            org.opencontainers.image.description=Custom Caddy build with caddy-docker-proxy and cloudflare-dns plugins
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.vendor=marquard.org
+            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.version={{date 'YYYYMMDD'}}
 
-      - name: Build and push
-        uses: docker/build-push-action@v7
-        with:
-          context: .
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          annotations: ${{ steps.meta.outputs.annotations }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Update versions file
-        if: github.event_name == 'schedule' || github.ref == 'refs/heads/main'
+      - name: Create manifest list and push
+        working-directory: ${{ runner.temp }}/digests
+        env:
+          IMAGE: ${{ steps.img.outputs.name }}
+          METADATA: ${{ steps.meta.outputs.json }}
         run: |
-          echo "${{ needs.check-updates.outputs.caddy-version }},${{ needs.check-updates.outputs.proxy-version }},${{ needs.check-updates.outputs.cloudflare-version }}" > versions.txt
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add versions.txt
-          git diff --staged --quiet || git commit -m "Update dependency versions"
-          git push
+          set -euo pipefail
+          args=()
+          while IFS= read -r tag; do args+=(-t "$tag"); done < <(jq -r '.tags[]' <<< "$METADATA")
+          while IFS= read -r ann; do args+=(--annotation "$ann"); done < <(jq -r '.annotations[]' <<< "$METADATA")
+          digests=()
+          for d in *; do digests+=("${IMAGE}@sha256:${d}"); done
+          docker buildx imagetools create "${args[@]}" "${digests[@]}"
+
+      - name: Inspect
+        env:
+          IMAGE: ${{ steps.img.outputs.name }}
+        run: docker buildx imagetools inspect "${IMAGE}:latest"
