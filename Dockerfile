@@ -6,7 +6,7 @@ RUN xcaddy build \
     --with github.com/caddy-dns/cloudflare
 
 # Final stage - use distroless
-FROM gcr.io/distroless/static-debian12:latest
+FROM gcr.io/distroless/static-debian13:latest
 
 # Copy Caddy binary from builder
 COPY --from=builder /usr/bin/caddy /usr/bin/caddy
