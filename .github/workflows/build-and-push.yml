@@ -190,7 +190,9 @@ jobs:
           provenance: false
           cache-from: type=gha,scope=${{ steps.prep.outputs.pair }}
           cache-to: type=gha,mode=max,scope=${{ steps.prep.outputs.pair }}
-          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,push=true', steps.prep.outputs.image) }}
+          # oci-mediatypes=true so the merged manifest becomes an OCI image index
+          # (a Docker manifest list can't carry the index-level description annotation).
+          outputs: ${{ github.event_name == 'pull_request' && 'type=cacheonly' || format('type=image,name={0},push-by-digest=true,name-canonical=true,oci-mediatypes=true,push=true', steps.prep.outputs.image) }}
 
       - name: Export digest
         if: github.event_name != 'pull_request'
