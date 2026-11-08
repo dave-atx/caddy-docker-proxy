@@ -1,9 +1,12 @@
 version: 2
 updates:
+  # Base images are pinned by digest in the Dockerfile. Check daily so
+  # security fixes in the builder or distroless image ship quickly; merging
+  # the PR pushes to main, which rebuilds the image.
   - package-ecosystem: "docker"
     directory: "/"
     schedule:
-      interval: "weekly"
+      interval: "daily"
   - package-ecosystem: "github-actions"
     directory: "/"
     schedule:

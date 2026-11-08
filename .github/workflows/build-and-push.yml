@@ -17,6 +17,9 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}/caddy-proxy
+  IMAGE_TITLE: Caddy with Docker Proxy and Cloudflare DNS
+  IMAGE_VENDOR: marquard.org
+  IMAGE_LICENSES: Apache-2.0
 
 jobs:
   check-updates:
@@ -28,6 +31,7 @@ jobs:
       caddy-version: ${{ steps.latest.outputs.caddy }}
       proxy-version: ${{ steps.latest.outputs.proxy }}
       cloudflare-version: ${{ steps.latest.outputs.cloudflare }}
+      description: ${{ steps.latest.outputs.description }}
     steps:
       - name: Get latest upstream versions
         id: latest
@@ -57,6 +61,8 @@ jobs:
             echo "caddy=$CADDY"
             echo "proxy=$PROXY"
             echo "cloudflare=$CLOUDFLARE"
+            # Shown on the GitHub package page (index-level annotation).
+            echo "description=Caddy ${CADDY} with caddy-docker-proxy ${PROXY} and caddy-dns/cloudflare ${CLOUDFLARE}"
           } >> "$GITHUB_OUTPUT"
 
       - name: Read versions from the :latest image labels
@@ -107,20 +113,42 @@ jobs:
             echo "cloudflare=$(label org.marquard.caddy-dns-cloudflare.version)"
           } >> "$GITHUB_OUTPUT"
 
+      # Base image updates arrive as Dependabot PRs that change the Dockerfile
+      # digests; merging one pushes to main, which always builds.
       - name: Decide whether to build
         id: check
         env:
           LATEST: ${{ steps.latest.outputs.caddy }},${{ steps.latest.outputs.proxy }},${{ steps.latest.outputs.cloudflare }}
           CURRENT: ${{ steps.current.outputs.caddy }},${{ steps.current.outputs.proxy }},${{ steps.current.outputs.cloudflare }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
           echo "latest:  $LATEST"
           echo "current: $CURRENT"
           if [ "$LATEST" != "$CURRENT" ]; then
             echo "should-build=true" >> "$GITHUB_OUTPUT"
+            decision="Upstream versions changed; building."
+          elif [ "$EVENT" != "schedule" ]; then
+            echo "should-build=false" >> "$GITHUB_OUTPUT"
+            decision="Versions unchanged; building anyway (\`$EVENT\` event)."
           else
             echo "should-build=false" >> "$GITHUB_OUTPUT"
+            decision="Versions unchanged; skipping build."
           fi
+
+          IFS=, read -r lc lp lf <<< "$LATEST"
+          IFS=, read -r cc cp cf <<< "$CURRENT"
+          {
+            echo "### Upstream versions"
+            echo
+            echo "| Component | Latest | In \`:latest\` image |"
+            echo "| --- | --- | --- |"
+            echo "| Caddy | $lc | ${cc:-—} |"
+            echo "| caddy-docker-proxy | $lp | ${cp:-—} |"
+            echo "| caddy-dns/cloudflare | $lf | ${cf:-—} |"
+            echo
+            echo "$decision"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: check-updates
@@ -156,16 +184,13 @@ jobs:
         uses: docker/metadata-action@v6
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # The org.marquard.*.version labels come from the Dockerfile build args.
           labels: |
-            org.opencontainers.image.title=Caddy with Docker Proxy and Cloudflare DNS
-            org.opencontainers.image.description=Custom Caddy build with caddy-docker-proxy and cloudflare-dns plugins
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.vendor=marquard.org
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.title=${{ env.IMAGE_TITLE }}
+            org.opencontainers.image.description=${{ needs.check-updates.outputs.description }}
+            org.opencontainers.image.vendor=${{ env.IMAGE_VENDOR }}
+            org.opencontainers.image.licenses=${{ env.IMAGE_LICENSES }}
             org.opencontainers.image.version={{date 'YYYYMMDD'}}
-            org.marquard.caddy.version=${{ needs.check-updates.outputs.caddy-version }}
-            org.marquard.caddy-docker-proxy.version=${{ needs.check-updates.outputs.proxy-version }}
-            org.marquard.caddy-dns-cloudflare.version=${{ needs.check-updates.outputs.cloudflare-version }}
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
@@ -186,6 +211,10 @@ jobs:
         with:
           context: .
           platforms: ${{ matrix.platform }}
+          build-args: |
+            CADDY_VERSION=${{ needs.check-updates.outputs.caddy-version }}
+            PROXY_VERSION=${{ needs.check-updates.outputs.proxy-version }}
+            CLOUDFLARE_VERSION=${{ needs.check-updates.outputs.cloudflare-version }}
           labels: ${{ steps.meta.outputs.labels }}
           provenance: false
           cache-from: type=gha,scope=${{ steps.prep.outputs.pair }}
@@ -231,6 +260,19 @@ jobs:
           IMAGE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: echo "name=${IMAGE,,}" >> "$GITHUB_OUTPUT"
 
+      - name: Strip the leading v from versions for tags
+        id: ver
+        env:
+          CADDY: ${{ needs.check-updates.outputs.caddy-version }}
+          PROXY: ${{ needs.check-updates.outputs.proxy-version }}
+          CLOUDFLARE: ${{ needs.check-updates.outputs.cloudflare-version }}
+        run: |
+          {
+            echo "caddy=${CADDY#v}"
+            echo "proxy=${PROXY#v}"
+            echo "cloudflare=${CLOUDFLARE#v}"
+          } >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
@@ -250,16 +292,19 @@ jobs:
           DOCKER_METADATA_ANNOTATIONS_LEVELS: index
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # Version tags show up in the package page's tag list. caddy-<ver>
+          # moves with plugin updates; the full tag identifies one exact build.
           tags: |
-            type=schedule,pattern={{date 'YYYYMMDD'}}
             type=ref,event=branch
             type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value={{date 'YYYYMMDD'}},enable={{is_default_branch}}
+            type=raw,value=caddy-${{ steps.ver.outputs.caddy }},enable={{is_default_branch}}
+            type=raw,value=caddy-${{ steps.ver.outputs.caddy }}-proxy-${{ steps.ver.outputs.proxy }}-cloudflare-${{ steps.ver.outputs.cloudflare }},enable={{is_default_branch}}
           annotations: |
-            org.opencontainers.image.title=Caddy with Docker Proxy and Cloudflare DNS
-            org.opencontainers.image.description=Custom Caddy build with caddy-docker-proxy and cloudflare-dns plugins
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.vendor=marquard.org
-            org.opencontainers.image.licenses=Apache-2.0
+            org.opencontainers.image.title=${{ env.IMAGE_TITLE }}
+            org.opencontainers.image.description=${{ needs.check-updates.outputs.description }}
+            org.opencontainers.image.vendor=${{ env.IMAGE_VENDOR }}
+            org.opencontainers.image.licenses=${{ env.IMAGE_LICENSES }}
             org.opencontainers.image.version={{date 'YYYYMMDD'}}
 
       - name: Create manifest list and push
@@ -276,7 +321,29 @@ jobs:
           for d in *; do digests+=("${IMAGE}@sha256:${d}"); done
           docker buildx imagetools create "${args[@]}" "${digests[@]}"
 
-      - name: Inspect
+      - name: Inspect and summarize
         env:
           IMAGE: ${{ steps.img.outputs.name }}
-        run: docker buildx imagetools inspect "${IMAGE}:latest"
+          METADATA: ${{ steps.meta.outputs.json }}
+          CADDY: ${{ needs.check-updates.outputs.caddy-version }}
+          PROXY: ${{ needs.check-updates.outputs.proxy-version }}
+          CLOUDFLARE: ${{ needs.check-updates.outputs.cloudflare-version }}
+        run: |
+          set -euo pipefail
+          FIRST_TAG=$(jq -r '.tags[0]' <<< "$METADATA")
+          docker buildx imagetools inspect "$FIRST_TAG"
+          DIGEST=$(docker buildx imagetools inspect "$FIRST_TAG" --format '{{json .Manifest}}' | jq -r .digest)
+          {
+            echo "### Published image"
+            echo
+            echo "| Component | Version |"
+            echo "| --- | --- |"
+            echo "| Caddy | [$CADDY](https://github.com/caddyserver/caddy/releases/tag/$CADDY) |"
+            echo "| caddy-docker-proxy | [$PROXY](https://github.com/lucaslorentz/caddy-docker-proxy/releases/tag/$PROXY) |"
+            echo "| caddy-dns/cloudflare | [$CLOUDFLARE](https://github.com/caddy-dns/cloudflare/tree/$CLOUDFLARE) |"
+            echo
+            echo "Digest: \`${IMAGE}@${DIGEST}\`"
+            echo
+            echo "Tags:"
+            jq -r '.tags[] | "- `\(.)`"' <<< "$METADATA"
+          } >> "$GITHUB_STEP_SUMMARY"
