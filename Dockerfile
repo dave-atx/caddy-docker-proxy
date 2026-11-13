@@ -16,7 +16,7 @@ RUN : "${CADDY_VERSION:?build arg required}" \
       --with "github.com/lucaslorentz/caddy-docker-proxy/v2@${PROXY_VERSION}" \
       --with "github.com/caddy-dns/cloudflare@${CLOUDFLARE_VERSION}"
 
-FROM gcr.io/distroless/static-debian13:latest@sha256:448810357cc8e67b7208988abdba0f5ec3d3aebee0a5b13eb624979792cffc0f
+FROM gcr.io/distroless/static-debian13:latest@sha256:1a64f46364620465ef9e9a8f5413757dfdf22695e050bbfd7303eeaf17a59383
 
 ARG CADDY_VERSION
 ARG PROXY_VERSION
