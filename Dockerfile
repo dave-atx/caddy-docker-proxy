@@ -1,6 +1,6 @@
 # Base images are pinned by digest so builds are reproducible; Dependabot
 # opens a PR when either digest changes, and merging it triggers a rebuild.
-FROM caddy:2-builder@sha256:3db11aead97f1fdff9c563d0dd8e7fba2e4c7031bef40f3e44fd1982f3e8366b AS builder
+FROM caddy:2-builder@sha256:6350162b3889ca32600b3c699c61572fa0eb3ad6b2a51874f19b158a7df77511 AS builder
 
 # Component versions (e.g. v2.11.9). CI passes the latest upstream releases;
 # pinning them here makes the build match the labels and busts the layer
